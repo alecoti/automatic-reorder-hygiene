@@ -10,39 +10,22 @@ function allocazioneScorteNonParziale() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getActiveSheet();
   const data = sheet.getDataRange().getValues();
-
-  const startRow = 1;
   const startDataRow = 2;
-  const startCol = 81; // Colonna CC
-
-  // Pulisco eventuali residui dell'esecuzione precedente oltre la colonna CC
-  const lastCol = sheet.getLastColumn();
-  if (lastCol >= startCol) {
-    sheet.deleteColumns(startCol, lastCol - startCol + 1);
-  }
 
   // === HW ===
   const disponibilitaHW = generaDisponibilitaHW(data, startDataRow);
-  const esitoHW = allocaFabbisogniHW(data, startDataRow, disponibilitaHW);
+  const risultatiHW = allocaFabbisogniHW(data, startDataRow, disponibilitaHW);
 
   // === CONS ===
   const disponibilitaCONS = generaDisponibilitaCONS(data, startDataRow);
-  const esitoCONS = allocaFabbisogniCONS(data, startDataRow, disponibilitaCONS);
+  const risultatiCONS = allocaFabbisogniCONS(data, startDataRow, disponibilitaCONS);
 
-  // === Scrittura su foglio principale a partire dalla colonna CC ===
-  const panoramica = preparaRisultatiPerFoglio(data, startDataRow, esitoHW, esitoCONS);
-  scriviRisultatiAllocazioneUnificata(
-    sheet,
-    startRow,
-    startDataRow,
-    startCol,
-    data,
-    panoramica.risultati,
-    panoramica.maxAllocazioni
-  );
+  // === Output complessivo ===
+  const panoramica = preparaOutputComplessivo(data, startDataRow, risultatiHW, risultatiCONS);
+  scriviAllocazioneComplessiva(ss, panoramica);
 
   // === Trasferimenti & report ===
-  const trasferimentiComplessivi = combinaTrasferimenti(esitoHW.trasferimenti, esitoCONS.trasferimenti);
+  const trasferimentiComplessivi = combinaTrasferimenti(risultatiHW.trasferimenti, risultatiCONS.trasferimenti);
   scriviTrasferimentiComplessivi(ss, trasferimentiComplessivi);
   scriviReportTrasferimentiComplessivi(ss, trasferimentiComplessivi);
   scriviReportAcquistiComplessivi(ss, data, startDataRow);
@@ -56,133 +39,115 @@ function allocazioneScorteUnificata() {
 }
 
 /**
- * Prepara i risultati combinati pronti per la scrittura sul foglio principale.
+ * Prepara le righe di output per il foglio consolidato.
+ * @returns {{ headers: string[], righe: any[][] }}
  */
-function preparaRisultatiPerFoglio(data, startDataRow, risultatiHW, risultatiCONS) {
-  const risultati = new Array(data.length);
-  let maxAllocazioni = 0;
-
-  const offset = startDataRow - 1;
-
-  for (let i = startDataRow - 1; i < data.length; i++) {
-    const categoria = data[i][12];
-    let base = {};
-
-    if (categoria === "HW") {
-      const sorgente = risultatiHW.risultati[i] || {};
-      base = {
-        ubic: sorgente.ubic,
-        codice: sorgente.codice,
-        bwRicalcolato: sorgente.bwRicalcolato,
-        allocazioni: (sorgente.allocazioni || []).map(a => [a[0], a[1], a[2] || ""]),
-        azione: sorgente.azione,
-        motivo: sorgente.motivo,
-        acquisto: sorgente.acquisto
-      };
-    } else if (categoria === "CONS") {
-      const consIndex = i - offset;
-      const sorgente = risultatiCONS.risultati[consIndex] || {};
-      base = {
-        ubic: sorgente.ubic,
-        codice: sorgente.codice,
-        bwRicalcolato: sorgente.bwRicalcolato,
-        allocazioni: (sorgente.allocazioni || []).map(a => [a[0], a[1], ""]),
-        azione: sorgente.azione,
-        motivo: sorgente.motivo,
-        acquisto: sorgente.acquisto
-      };
-    }
-
-    risultati[i] = base;
-    if (base.allocazioni && base.allocazioni.length > maxAllocazioni) {
-      maxAllocazioni = base.allocazioni.length;
-    }
-  }
-
-  return { risultati, maxAllocazioni };
-}
-
-function scriviRisultatiAllocazioneUnificata(sheet, startRow, startDataRow, startCol, data, risultati, maxAllocazioni) {
-  const headers = [
-    "Totale Donato", "Totale Ricevuto", "Fabbisogno Ricalcolato",
-    "Azione", "Motivo", "Quantità Acquisto", "Valore Ordine"
+function preparaOutputComplessivo(data, startDataRow, risultatiHW, risultatiCONS) {
+  const headersBase = [
+    "Categoria",
+    "Ubicazione",
+    "Articolo",
+    "Totale Donato",
+    "Totale Ricevuto",
+    "Fabbisogno Ricalcolato",
+    "Azione",
+    "Motivo",
+    "Quantità Acquisto",
+    "Valore Ordine"
   ];
 
-  const allocHeaders = [];
-  for (let j = 0; j < maxAllocazioni; j++) {
-    allocHeaders.push(`Source ${j + 1}`);
-    allocHeaders.push(`Qty ${j + 1}`);
-    allocHeaders.push(`Tipo ${j + 1}`);
-  }
+  let righe = [];
+  let maxAllocazioni = 0;
 
-  const neededCols = headers.length + allocHeaders.length;
-  const lastCol = sheet.getLastColumn();
-  const missing = (startCol + neededCols - 1) - lastCol;
-  if (missing > 0) {
-    sheet.insertColumnsAfter(lastCol, missing);
-  }
-
-  sheet.getRange(startRow, startCol, 1, neededCols)
-    .setValues([headers.concat(allocHeaders)]);
-
-  const out = [];
   for (let i = startDataRow - 1; i < data.length; i++) {
-    const categoria = data[i][12];
-    const risultato = risultati[i] || {};
+    const categoria = data[i][12]; // Colonna M
+    if (categoria !== "HW" && categoria !== "CONS") continue;
 
-    if (categoria !== "HW" && categoria !== "CONS") {
-      out.push(new Array(neededCols).fill(""));
-      continue;
-    }
+    const ubicazione = data[i][1];
+    const articolo = data[i][3];
+    const prezzo = parseFloat(data[i][60]); // Colonna BI
 
-    const allocazioni = (risultato.allocazioni || []).map(a => [a[0] || "", a[1] || "", a[2] || ""]);
+    const risultato = (categoria === "HW")
+      ? (risultatiHW.risultati[i] || {})
+      : (risultatiCONS.risultati[i] || {});
+
+    const allocazioniRaw = risultato.allocazioni || [];
+    const allocazioni = allocazioniRaw.map(entry => {
+      if (categoria === "HW") {
+        return [entry[0], entry[1], entry[2] || ""];
+      }
+      // CONS: aggiungo il riferimento categoria per coerenza con HW
+      return [entry[0], entry[1], "CONS"];
+    });
+
+    maxAllocazioni = Math.max(maxAllocazioni, allocazioni.length);
+
     const totaleDonato = calcolaTotaleDonato(allocazioni);
     const totaleRicevuto = calcolaTotaleRicevuto(allocazioni);
-
     const acquistoNum = parseFloat(risultato.acquisto);
     const acquisto = (!isNaN(acquistoNum) && acquistoNum > 0) ? acquistoNum : "";
     const haAllocazioni = allocazioni.length > 0;
-    const fabbisognoRicalcolato = (haAllocazioni || acquisto !== "")
+    const fabbisognoRicalcolato = (haAllocazioni || acquisto)
       ? (risultato.bwRicalcolato ?? "")
       : "";
+    const valoreOrdine = (acquisto && !isNaN(prezzo)) ? acquistoNum * prezzo : "";
 
-    const rowData = [
+    let row = [
+      categoria || "",
+      ubicazione || "",
+      articolo || "",
       totaleDonato || "",
       totaleRicevuto || "",
       fabbisognoRicalcolato,
       risultato.azione || "",
       risultato.motivo || "",
       acquisto,
-      ""
+      valoreOrdine || ""
     ];
 
-    allocazioni.forEach(a => rowData.push(a[0], a[1], a[2]));
-    while (rowData.length < neededCols) rowData.push("");
+    allocazioni.forEach(a => {
+      row.push(a[0] || "", a[1] || "", a[2] || "");
+    });
 
-    out.push(rowData);
+    righe.push(row);
   }
 
-  if (out.length > 0) {
-    const range = sheet.getRange(startDataRow, startCol, out.length, neededCols);
-    range.setValues(out);
-    range.setHorizontalAlignment("center");
+  // Completa le colonne delle allocazioni
+  const allocHeaders = [];
+  for (let j = 0; j < maxAllocazioni; j++) {
+    allocHeaders.push(`Source ${j + 1}`, `Qty ${j + 1}`, `Tipo ${j + 1}`);
   }
 
-  for (let col = startCol; col < startCol + neededCols; col++) {
-    sheet.autoResizeColumn(col);
+  const headers = headersBase.concat(allocHeaders);
+  const valori = righe.map(row => padRow(row, headers.length));
+
+  return { headers, righe: valori };
+}
+
+/**
+ * Scrive il foglio complessivo di allocazione.
+ */
+function scriviAllocazioneComplessiva(ss, panoramica) {
+  const sheetName = "AllocazioneNonParziale";
+  let outSheet = ss.getSheetByName(sheetName);
+  if (!outSheet) {
+    outSheet = ss.insertSheet(sheetName);
+  } else {
+    outSheet.clear();
   }
 
-  const lastRowOut = startDataRow + out.length - 1;
-  if (out.length > 0) {
-    const colAzione = startCol + 3;
-    const colQta = startCol + 5;
-    const colValore = startCol + 6;
-    const colPrezzo = 61; // Colonna BI
+  const headers = panoramica.headers;
+  outSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 
-    for (let r = startDataRow; r <= lastRowOut; r++) {
-      const formula = `=IF($${colToLetter(colAzione)}${r}="ACQUISTARE", $${colToLetter(colQta)}${r}*$${colToLetter(colPrezzo)}${r}, "")`;
-      sheet.getRange(r, colValore).setFormula(formula);
-    }
+  if (panoramica.righe.length > 0) {
+    outSheet.getRange(2, 1, panoramica.righe.length, headers.length)
+      .setValues(panoramica.righe);
+  }
+
+  const lastRow = Math.max(1, panoramica.righe.length + 1);
+  outSheet.getRange(1, 1, lastRow, headers.length).setHorizontalAlignment("center");
+  for (let col = 1; col <= headers.length; col++) {
+    outSheet.autoResizeColumn(col);
   }
 }
 
