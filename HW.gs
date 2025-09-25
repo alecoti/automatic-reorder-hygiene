@@ -1,6 +1,9 @@
 /**
  * Funzione principale per HW
  */
+/**
+ * Funzione principale per HW
+ */
 function allocazioneScorteHW() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getActiveSheet();
@@ -16,8 +19,30 @@ function allocazioneScorteHW() {
     sheet.deleteColumns(startCol, lastCol - startCol + 1);
   }
 
+  // === DEBUG: controllo quante righe HW ci sono ===
+  let countHW = 0;
+  for (let i = startDataRow - 1; i < data.length; i++) {
+    const codice = data[i][3];      // Colonna D
+    const ubic = data[i][1];        // Colonna B
+    const tipo = data[i][12];       // Colonna M
+    const fabU = parseFloat(data[i][69]); // Colonna BR
+    const fabS = parseFloat(data[i][70]); // Colonna BS
+    if (tipo === "HW") {
+      countHW++;
+      Logger.log(
+        "Riga %s | Codice: %s | Ubic: %s | Tipo: %s | fabU: %s | fabS: %s",
+        i + 1, codice, ubic, tipo, fabU, fabS
+      );
+    }
+  }
+  Logger.log("Totale righe con HW trovate: %s", countHW);
+
   // === STEP 1: Generazione disponibilità da donatori (HW) ===
   const disponibilita = generaDisponibilitaHW(data, startDataRow);
+  Logger.log("Disponibilità generate: U=%s, S=%s",
+    JSON.stringify(disponibilita.disponibilitaU),
+    JSON.stringify(disponibilita.disponibilitaS)
+  );
 
   // === STEP 2: Allocazione fabbisogni (HW) ===
   const {
@@ -27,18 +52,24 @@ function allocazioneScorteHW() {
     maxAllocazioni
   } = allocaFabbisogniHW(data, startDataRow, disponibilita);
 
+  Logger.log("Totale risultati generati: %s", risultati.length);
+  Logger.log("Totale trasferimenti generati: %s", trasferimenti.length);
+  Logger.log("Max allocazioni: %s", maxAllocazioni);
+
   // === STEP 3: Scrittura risultati (HW) ===
   scriviRisultatiHW(sheet, startRow, startDataRow, startCol, data, risultati, bwRicalcolato, maxAllocazioni);
 
   // === STEP 4: Scrittura trasferimenti (HW) ===
   scriviTrasferimentiHW(ss, trasferimenti);
-  
+
   // === STEP 5: Report acquisti (HW) ===
   scriviReportAcquistiHW();
 
   // === STEP 6: Scrittura valore ordine (BX × BI in BY) ===
   scriviValoreOrdineHW(sheet, startDataRow);
 }
+
+
 
 /**
  * Crea mappe delle disponibilità donatori (HW).
@@ -81,14 +112,12 @@ function generaDisponibilitaHW(data, startDataRow) {
  * - Si usano i donor più grandi (preferendo Usati a Stock in caso di parità)
  */
 
-/**
- * Alloca i fabbisogni per HW con logica ottimizzata:
- * - Considera solo le righe con categoria = "HW"
- * - Raggruppa per articolo
- * - Serve prima i riceventi con fabbisogno maggiore
- * - Usa i donor con disponibilità maggiore (preferendo Usati "_U" a Stock in caso di parità)
- */
-
+// BX-driven: i riceventi sono solo le righe HW con BX (col 76) > 0.
+// Se una riga viene coperta in parte da trasferimenti e in parte da acquisti,
+// l'azione viene marcata come "COMBINATO".
+// BX-driven: i riceventi sono solo le righe HW con BX (col 76) > 0.
+// Se una riga viene coperta in parte da trasferimenti e in parte da acquisti,
+// l'azione viene marcata come "COMBINATO".
 function allocaFabbisogniHW(data, startDataRow, disponibilita) {
   let trasferimenti = [];
   let bwRicalcolato = {};
@@ -97,146 +126,133 @@ function allocaFabbisogniHW(data, startDataRow, disponibilita) {
 
   const { disponibilitaU, disponibilitaS } = disponibilita;
 
-  Logger.log("=== INIZIO ALLOCAZIONE HW ===");
-  Logger.log("Disponibilità Usati (U): %s", JSON.stringify(disponibilitaU));
-  Logger.log("Disponibilità Stock (S): %s", JSON.stringify(disponibilitaS));
-
+  // === 1) Costruisco i riceventi per articolo (solo HW con BX>0) ===
+  let riceventiPerArticolo = {};
   for (let i = startDataRow - 1; i < data.length; i++) {
-    const codice = data[i][3];               // Articolo
-    const ubic = data[i][1];                 // Ubicazione
-    const tipo = data[i][12];                // Tipo (es. HW)
-    const copertura = parseFloat(data[i][11]);
-    let fabU = parseFloat(data[i][69]);      // Colonna BR
-    let fabS = parseFloat(data[i][70]);      // Colonna BS
-    let ord = parseFloat(data[i][75]);       // Colonna BX
+    const codice = data[i][3];                // D - Articolo
+    const ubic = data[i][1];                  // B - Ubicazione
+    const tipo = data[i][12];                 // M - Categoria
+    const copertura = parseFloat(data[i][11]); // L - Copertura
+    const ord = parseFloat(data[i][75]);      // BX - Quantità Ordine
 
-    Logger.log("Riga %s -> codice:%s, ubic:%s, tipo:%s, copertura:%s, fabU:%s, fabS:%s, ord:%s",
-      i + 1, codice, ubic, tipo, copertura, fabU, fabS, ord);
+    if (!codice || tipo !== "HW") continue;
+    if (isNaN(ord) || ord <= 0) continue;     // ricevente solo se BX>0
 
-    // Skip se non valida
-    if (!codice || (isNaN(fabU) && isNaN(fabS)) || isNaN(ord)) {
-      Logger.log("Riga %s SKIPPATA (dati mancanti o non validi)", i + 1);
-      risultati.push({});
-      continue;
-    }
+    if (!riceventiPerArticolo[codice]) riceventiPerArticolo[codice] = [];
+    riceventiPerArticolo[codice].push({
+      index: i,
+      codice,
+      ubic,
+      ord,
+      copertura
+    });
+  }
 
-    const key = codice + "|" + ubic;
-    let allocazioni = [];
-    let azione = "";
-    let motivo = "";
-    let acquisto = "";
+  // === 2) Alloco: donor più capienti prima; preferisco Usati (_U) a parità ===
+  for (let codice in riceventiPerArticolo) {
+    // serve prima chi ha BX più alto
+    let riceventi = riceventiPerArticolo[codice].sort((a, b) => (b.ord - a.ord));
 
-    const fabTotale = (isNaN(fabU) ? 0 : fabU) + (isNaN(fabS) ? 0 : fabS);
-    if (bwRicalcolato[key] === undefined) bwRicalcolato[key] = fabTotale;
+    for (let rec of riceventi) {
+      const key = rec.codice + "|" + rec.ubic;
+      let fabBisogno = rec.ord;         // bisogno = BX
+      let allocazioni = [];
+      let azione = "";
+      let motivo = "";
+      let acquisto = 0;
 
-    Logger.log("Riga %s -> fabTotale: %s", i + 1, fabTotale);
+      if (bwRicalcolato[key] === undefined) bwRicalcolato[key] = fabBisogno;
 
-    if (tipo === "HW" && fabTotale > 0) {
-      let fabBisogno = fabTotale;
-      Logger.log("Riga %s -> fabBisogno iniziale: %s", i + 1, fabBisogno);
-
-      if (copertura < 100) {
+      // === NUOVO CHECK: copertura nazionale (colonna L) ===
+      if (rec.copertura < 100) {
         azione = "ACQUISTARE";
-        motivo = "Copertura <100";
-        acquisto = ord;
+        motivo = "STOCK NAZ <100 COPERTURA";
+        acquisto = fabBisogno;
         bwRicalcolato[key] = 0;
-        Logger.log("Riga %s -> DECISIONE: ACQUISTARE (copertura <100)", i + 1);
-
       } else {
-        Logger.log("Riga %s -> INIZIO allocazione da donor", i + 1);
-
-        // Lista candidati (sia usati che stock), ordinata prima per qty, poi preferendo U
-        let candidati = [];
-
-        if (disponibilitaU[codice]) {
-          for (let [mag, qty] of Object.entries(disponibilitaU[codice])) {
-            if (mag !== ubic && qty > 0) {
-              candidati.push({ mag, qty, tipo: "_U" });
-            }
+        // Donor disponibili per questo articolo (escludo stessa ubicazione)
+        let donors = [];
+        if (disponibilitaU[rec.codice]) {
+          for (let [mag, qty] of Object.entries(disponibilitaU[rec.codice])) {
+            if (mag !== rec.ubic && qty > 0) donors.push({ mag, qty, tipo: "_U" });
           }
         }
-        if (disponibilitaS[codice]) {
-          for (let [mag, qty] of Object.entries(disponibilitaS[codice])) {
-            if (mag !== ubic && qty > 0) {
-              candidati.push({ mag, qty, tipo: "" });
-            }
+        if (disponibilitaS[rec.codice]) {
+          for (let [mag, qty] of Object.entries(disponibilitaS[rec.codice])) {
+            if (mag !== rec.ubic && qty > 0) donors.push({ mag, qty, tipo: "" });
           }
         }
 
-        // Ordina: prima quantità più grande, a parità preferisci Usato
-        candidati.sort((a, b) => {
-          if (b.qty !== a.qty) return b.qty - a.qty;
-          if (a.tipo === "_U" && b.tipo !== "_U") return -1;
-          if (a.tipo !== "_U" && b.tipo === "_U") return 1;
-          return 0;
+        // Ordino donor: quantità desc; a parità preferisco Usati
+        donors.sort((a, b) => {
+          if (b.qty === a.qty) return (a.tipo === "_U" ? -1 : 1);
+          return b.qty - a.qty;
         });
 
-        Logger.log("Riga %s -> Candidati donor ordinati: %s", i + 1, JSON.stringify(candidati));
-
-        // Assegna fino a coprire il fabBisogno
-        for (let donor of candidati) {
+        // Trasferimenti greedy
+        for (let donor of donors) {
           if (fabBisogno <= 0) break;
           const prelievo = Math.min(fabBisogno, donor.qty);
           if (prelievo <= 0) continue;
 
-          Logger.log("Riga %s -> Assegno da donor %s (%s) qty:%s", i + 1, donor.mag, donor.tipo, prelievo);
-
           allocazioni.push([donor.mag, prelievo, donor.tipo]);
-
           if (donor.tipo === "_U") {
-            disponibilitaU[codice][donor.mag] -= prelievo;
-            trasferimenti.push([codice + "_U", donor.mag, ubic, prelievo]);
+            disponibilitaU[rec.codice][donor.mag] -= prelievo;
           } else {
-            disponibilitaS[codice][donor.mag] -= prelievo;
-            trasferimenti.push([codice, donor.mag, ubic, prelievo]);
+            disponibilitaS[rec.codice][donor.mag] -= prelievo;
           }
 
-          const donorKey = codice + "|" + donor.mag;
+          const donorKey = rec.codice + "|" + donor.mag;
           bwRicalcolato[donorKey] = (bwRicalcolato[donorKey] || 0) + prelievo;
           bwRicalcolato[key] -= prelievo;
 
           fabBisogno -= prelievo;
+          trasferimenti.push([rec.codice + donor.tipo, donor.mag, rec.ubic, prelievo]);
         }
 
+        // Residuo → acquisto; se c'è anche almeno un trasferimento diventa COMBINATO
         if (fabBisogno > 0) {
-          azione = "ACQUISTARE";
-          motivo = "Residuo non coperto";
           acquisto = fabBisogno;
+          azione = (allocazioni.length > 0) ? "COMBINATO" : "ACQUISTARE";
+          motivo = (allocazioni.length > 0) ? "COMBINATO" : "Residuo non coperto (BX)";
           bwRicalcolato[key] = 0;
-          Logger.log("Riga %s -> DECISIONE: ACQUISTARE residuo %s", i + 1, fabBisogno);
         } else {
-          azione = "TRASFERIMENTO";
-          Logger.log("Riga %s -> DECISIONE: TRASFERIMENTO completato", i + 1);
+          azione = (allocazioni.length > 0) ? "TRASFERIMENTO" : "";
         }
       }
+
+      maxAllocazioni = Math.max(maxAllocazioni, allocazioni.length);
+
+      risultati[rec.index] = {
+        ubic: rec.ubic,
+        codice: rec.codice,
+        key,
+        bwRicalcolato: bwRicalcolato[key],
+        allocazioni,
+        azione,
+        motivo,
+        acquisto
+      };
     }
-
-    maxAllocazioni = Math.max(maxAllocazioni, allocazioni.length);
-
-    const resultRow = {
-      ubic,
-      codice,
-      key,
-      bwRicalcolato: bwRicalcolato[key],
-      allocazioni,
-      azione,
-      motivo,
-      acquisto
-    };
-
-    risultati.push(resultRow);
-    Logger.log("Riga %s -> RISULTATO: %s", i + 1, JSON.stringify(resultRow));
   }
 
-  Logger.log("=== FINE ALLOCAZIONE HW ===");
   return { risultati, trasferimenti, bwRicalcolato, maxAllocazioni };
 }
-
 
 
 /**
  * Scrive sul foglio principale (solo HW).
  */
+
+/**
+ * Scrive i risultati HW in modo ottimizzato:
+ * - costruisce tutte le righe in memoria
+ * - scrive tutto con un'unica operazione setValues
+ * - usa setFormulaR1C1 per applicare la formula "Valore Ordine" su tutte le righe
+ * - logga ogni passaggio importante
+ */
+
+
 function scriviRisultatiHW(sheet, startRow, startDataRow, startCol, data, risultati, bwRicalcolato, maxAllocazioni) {
   const headers = [
     "Totale Donato", "Totale Ricevuto", "BW Ricalcolato",
@@ -250,27 +266,33 @@ function scriviRisultatiHW(sheet, startRow, startDataRow, startCol, data, risult
   }
 
   const neededCols = headers.length + allocHeaders.length;
+
+  // Assicuro che esistano abbastanza colonne a destra di startCol per scrivere l'output
   const lastCol = sheet.getLastColumn();
   const missing = (startCol + neededCols - 1) - lastCol;
   if (missing > 0) {
     sheet.insertColumnsAfter(lastCol, missing);
   }
 
-  // Scrivo intestazioni
+  // Intestazioni
   sheet.getRange(startRow, startCol, 1, neededCols)
     .setValues([headers.concat(allocHeaders)]);
 
+  // Costruzione output riga per riga in base ai dati del foglio,
+  // garantendo l'allineamento con gli indici di "risultati"
   let out = [];
-  for (let i = 0; i < risultati.length; i++) {
+  for (let i = startDataRow - 1; i < data.length; i++) {
     const r = risultati[i];
-    if (!r.ubic) {
-      out.push(new Array(neededCols).fill(""));
+
+    if (!r || !r.ubic) {
+      out.push(new Array(neededCols).fill("")); // Riga vuota
       continue;
     }
 
-    const totDonato = (r.allocazioni || []).reduce((sum, a) => sum + a[1], 0);
-    const totRicevuto = (r.allocazioni || []).reduce((sum, a) => sum + a[1], 0);
-    const bwVal = (r.allocazioni.length > 0 || r.acquisto) ? r.bwRicalcolato : "";
+    const allocazioni = r.allocazioni || [];
+    const totDonato = allocazioni.reduce((sum, a) => sum + (a[1] || 0), 0);
+    const totRicevuto = allocazioni.reduce((sum, a) => sum + (a[1] || 0), 0);
+    const bwVal = (allocazioni.length > 0 || r.acquisto) ? (r.bwRicalcolato ?? "") : "";
 
     let rowData = [
       totDonato || "",
@@ -278,36 +300,41 @@ function scriviRisultatiHW(sheet, startRow, startDataRow, startCol, data, risult
       bwVal,
       r.azione || "",
       r.motivo || "",
-      r.acquisto || "",   // colonna Quantità Acquisto
-      ""                  // colonna Valore Ordine → ci scrivo formula dopo
+      r.acquisto || "",   // Quantità Acquisto
+      ""                  // Valore Ordine → formula inserita dopo
     ];
 
-    (r.allocazioni || []).forEach(a => rowData.push(a[0], a[1], a[2]));
+    // Aggiungo allocazioni
+    allocazioni.forEach(a => rowData.push(a[0], a[1], a[2]));
     while (rowData.length < neededCols) rowData.push("");
 
     out.push(rowData);
   }
 
+  // Scrittura massiva
   const range = sheet.getRange(startDataRow, startCol, out.length, neededCols);
   range.setValues(out);
-
   range.setHorizontalAlignment("center");
+
+  // Auto resize colonne
   for (let col = startCol; col < startCol + neededCols; col++) {
     sheet.autoResizeColumn(col);
   }
 
-  // === Inserisco la formula in "Valore Ordine" ===
-  const lastRow = sheet.getLastRow();
-  const colAzione = startCol + 3;         // colonna Azione
-  const colQta = startCol + 5;            // Quantità Acquisto
-  const colValore = startCol + 6;         // Valore Ordine
-  const colPrezzo = 61;                   // Colonna BI (prezzo unitario)
+  // Inserimento formula "Valore Ordine" (BY = Quantità Acquisto × Prezzo Unitario BI)
+  const lastRowOut = startDataRow + out.length - 1;
+  const colAzione = startCol + 3;      // Azione
+  const colQta = startCol + 5;         // Quantità Acquisto
+  const colValore = startCol + 6;      // Valore Ordine
+  const colPrezzo = 61;                // Colonna BI (prezzo unitario)
 
-  for (let r = startDataRow; r <= lastRow; r++) {
-    const formula = `=IF($${colToLetter(colAzione)}${r}="ACQUISTARE", $${colToLetter(colQta)}${r}*$BI${r}, "")`;
+  for (let r = startDataRow; r <= lastRowOut; r++) {
+    const formula = `=IF($${colToLetter(colAzione)}${r}="ACQUISTARE", $${colToLetter(colQta)}${r}*$${colToLetter(colPrezzo)}${r}, "")`;
     sheet.getRange(r, colValore).setFormula(formula);
   }
 }
+
+
 
 /**
  * Utility: converte numero colonna → lettera colonna
@@ -485,22 +512,51 @@ function scriviReportAcquistiHW() {
  * Scrive la colonna "Valore Ordine" (BY = BX × BI)
  */
 function scriviValoreOrdineHW(sheet, startDataRow) {
-  const lastRow = sheet.getLastRow();
-  const colQta = 76; // BX
-  const colPrezzo = 61; // BI
-  const colValore = colQta + 1; // BY
+  Logger.log("[HW] === INIZIO scriviValoreOrdineHW ===");
 
-  sheet.getRange(1, colValore).setValue("Valore Ordine");
+  try {
+    const lastRow = sheet.getLastRow();
+    const colQta = 76; // BX
+    const colPrezzo = 61; // BI
+    const colValore = colQta + 1; // BY
 
-  for (let i = startDataRow; i <= lastRow; i++) {
-    const qta = sheet.getRange(i, colQta).getValue();
-    const prezzo = sheet.getRange(i, colPrezzo).getValue();
-    if (qta && prezzo) {
-      sheet.getRange(i, colValore).setValue(qta * prezzo);
-    } else {
-      sheet.getRange(i, colValore).setValue("");
+    Logger.log("[HW] Ultima riga dati: %s", lastRow);
+    Logger.log("[HW] Colonne -> Qta: %s | Prezzo: %s | Valore: %s", colQta, colPrezzo, colValore);
+
+    // intestazione
+    sheet.getRange(1, colValore).setValue("Valore Ordine");
+    Logger.log("[HW] Intestazione scritta in colonna %s", colValore);
+
+    // ciclo sulle righe
+    for (let i = startDataRow; i <= lastRow; i++) {
+      try {
+        const qta = sheet.getRange(i, colQta).getValue();
+        const prezzo = sheet.getRange(i, colPrezzo).getValue();
+
+        Logger.log("[HW] Riga %s | Qta=%s | Prezzo=%s", i, qta, prezzo);
+
+        if (qta && prezzo) {
+          const valore = qta * prezzo;
+          sheet.getRange(i, colValore).setValue(valore);
+          Logger.log("[HW] --> Valore scritto: %s", valore);
+        } else {
+          sheet.getRange(i, colValore).setValue("");
+          Logger.log("[HW] --> Nessun valore (vuoto)");
+        }
+      } catch (rowErr) {
+        Logger.log("[ERRORE HW - Riga %s] %s", i, rowErr.stack || rowErr);
+      }
     }
+
+    // ridimensiona colonna
+    sheet.autoResizeColumn(colValore);
+    Logger.log("[HW] Colonna %s ridimensionata automaticamente", colValore);
+
+  } catch (err) {
+    Logger.log("[ERRORE HW scriviValoreOrdine] %s", err.stack || err);
+    throw err; // rilancia errore così interrompe
   }
 
-  sheet.autoResizeColumn(colValore);
+  Logger.log("[HW] === FINE scriviValoreOrdineHW ===");
 }
+
