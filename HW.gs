@@ -527,26 +527,33 @@ function scriviValoreOrdineHW(sheet, startDataRow) {
     sheet.getRange(1, colValore).setValue("Valore Ordine");
     Logger.log("[HW] Intestazione scritta in colonna %s", colValore);
 
-    // ciclo sulle righe
-    for (let i = startDataRow; i <= lastRow; i++) {
-      try {
-        const qta = sheet.getRange(i, colQta).getValue();
-        const prezzo = sheet.getRange(i, colPrezzo).getValue();
+    const numRows = lastRow - startDataRow + 1;
 
-        Logger.log("[HW] Riga %s | Qta=%s | Prezzo=%s", i, qta, prezzo);
+    if (numRows <= 0) {
+      Logger.log("[HW] Nessuna riga dati da elaborare");
+      sheet.autoResizeColumn(colValore);
+      Logger.log("[HW] Colonna %s ridimensionata automaticamente", colValore);
+      Logger.log("[HW] === FINE scriviValoreOrdineHW ===");
+      return;
+    }
 
-        if (qta && prezzo) {
-          const valore = qta * prezzo;
-          sheet.getRange(i, colValore).setValue(valore);
-          Logger.log("[HW] --> Valore scritto: %s", valore);
-        } else {
-          sheet.getRange(i, colValore).setValue("");
-          Logger.log("[HW] --> Nessun valore (vuoto)");
-        }
-      } catch (rowErr) {
-        Logger.log("[ERRORE HW - Riga %s] %s", i, rowErr.stack || rowErr);
+    const qtaValues = sheet.getRange(startDataRow, colQta, numRows, 1).getValues();
+    const prezzoValues = sheet.getRange(startDataRow, colPrezzo, numRows, 1).getValues();
+    const valori = new Array(numRows);
+
+    for (let i = 0; i < numRows; i++) {
+      const qta = qtaValues[i][0];
+      const prezzo = prezzoValues[i][0];
+
+      if (qta && prezzo) {
+        valori[i] = [qta * prezzo];
+      } else {
+        valori[i] = [""];
       }
     }
+
+    sheet.getRange(startDataRow, colValore, numRows, 1).setValues(valori);
+    Logger.log("[HW] Valori ordine calcolati per %s righe", numRows);
 
     // ridimensiona colonna
     sheet.autoResizeColumn(colValore);
