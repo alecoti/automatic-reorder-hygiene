@@ -7,6 +7,7 @@ function onOpen() {
     .addItem("Esegui allocazione HW", "allocazioneScorteHW")
     .addItem("Esegui allocazione CONS", "allocazioneScorteCONS")
     .addSeparator()
+    .addItem("Allocazione Scorte Non Parziale", "allocazioneScorteNonParziale")
     .addItem("Esegui allocazione UNIFICATA", "allocazioneScorteUnificata")
     .addToUi();
 }
