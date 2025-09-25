@@ -6,5 +6,7 @@ function onOpen() {
   ui.createMenu("Generatore Scorte")
     .addItem("Esegui allocazione HW", "allocazioneScorteHW")
     .addItem("Esegui allocazione CONS", "allocazioneScorteCONS")
+    .addSeparator()
+    .addItem("Esegui allocazione UNIFICATA", "allocazioneScorteUnificata")
     .addToUi();
 }
